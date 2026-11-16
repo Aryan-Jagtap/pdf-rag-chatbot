@@ -29,21 +29,36 @@ def load_embedding_model():
 
 
 def create_embeddings(chunks, model):
+    """
+    Generate normalized embeddings in small batches.
+    """
+
+    import torch
+
+    torch.set_num_threads(1)
+
+    print("Generating embeddings...")
 
     texts = [chunk["text"] for chunk in chunks]
 
-    print("\nGenerating embeddings...")
-
     embeddings = model.encode(
         texts,
-        batch_size=32,
+        batch_size=1,
         convert_to_numpy=True,
         normalize_embeddings=True,
         show_progress_bar=True,
         device="cpu"
     )
 
+    print("Embeddings generated successfully!")
+
     return embeddings
+
+
+
+
+
+
 
 
 
