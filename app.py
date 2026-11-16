@@ -2,41 +2,37 @@
 import os
 import time
 import hashlib
+import tempfile
+
 import streamlit as st
 
 from pdf_processor import extract_text_from_pdf, create_chunks
-
 from vector_store import (
     load_embedding_model,
     create_embeddings,
     create_faiss_index,
     search_similar_chunks
 )
-
 from rag_pipeline import generate_answer
 
 
-# ==========================================
-# 1. PAGE CONFIGURATION
-# ==========================================
+# --------------------------------------------------
+# PAGE CONFIGURATION
+# --------------------------------------------------
 
 st.set_page_config(
     page_title="PDF RAG Chatbot",
-    page_icon="📚",
+    page_icon="📄",
     layout="wide"
 )
 
-st.title("📚 PDF RAG Chatbot")
-
-st.write(
-    "Upload multiple PDF documents and ask questions "
-    "about their content using AI."
-)
+st.title("📄 PDF RAG Chatbot")
+st.caption("Upload a PDF and ask questions about its contents.")
 
 
-# ==========================================
-# 2. SESSION STATE
-# ==========================================
+# --------------------------------------------------
+# SESSION STATE
+# --------------------------------------------------
 
 if "embedding_model" not in st.session_state:
     st.session_state.embedding_model = None
@@ -54,319 +50,281 @@ if "messages" not in st.session_state:
     st.session_state.messages = []
 
 
-# ==========================================
-# 3. LOAD EMBEDDING MODEL
-# ==========================================
+# --------------------------------------------------
+# LOAD EMBEDDING MODEL
+# --------------------------------------------------
 
-@st.cache_resource
+@st.cache_resource(show_spinner=False)
 def get_embedding_model():
 
     return load_embedding_model()
 
 
-# ==========================================
-# 4. MULTIPLE PDF UPLOAD
-# ==========================================
+# --------------------------------------------------
+# CACHE PDF EXTRACTION AND CHUNKING
+# --------------------------------------------------
 
-uploaded_files = st.file_uploader(
-    "Upload your PDF documents",
+@st.cache_data(show_spinner=False)
+def process_pdf_cached(pdf_bytes, filename):
+
+    with tempfile.NamedTemporaryFile(
+        suffix=".pdf",
+        delete=False
+    ) as temp_file:
+
+        temp_file.write(pdf_bytes)
+        pdf_path = temp_file.name
+
+    try:
+
+        pages = extract_text_from_pdf(pdf_path)
+
+        if not pages:
+            raise ValueError("No pages could be extracted from this PDF.")
+
+        chunks = create_chunks(pages)
+
+        if not chunks:
+            raise ValueError(
+                "No readable text was found. "
+                "Please check whether the PDF is readable."
+            )
+
+        # Attach original PDF filename to every chunk
+        for chunk in chunks:
+            chunk["source"] = filename
+
+        return chunks, len(pages)
+
+    finally:
+
+        if os.path.exists(pdf_path):
+            os.remove(pdf_path)
+
+
+# --------------------------------------------------
+# CACHE EMBEDDINGS
+# --------------------------------------------------
+
+@st.cache_data(show_spinner=False)
+def generate_embeddings_cached(texts, _model):
+
+    # Reuse the tested embedding function
+    # batch_size=1 and CPU processing are configured there.
+
+    embedding_chunks = [
+        {"text": text}
+        for text in texts
+    ]
+
+    return create_embeddings(embedding_chunks, _model)
+
+
+# --------------------------------------------------
+# PDF UPLOAD
+# --------------------------------------------------
+
+st.subheader("Upload your PDF")
+
+uploaded_file = st.file_uploader(
+    "Choose one PDF file",
     type=["pdf"],
-    accept_multiple_files=True
+    accept_multiple_files=False
 )
 
-current_hash = None
 
-if uploaded_files:
+if uploaded_file is not None:
 
-    # Generate a unique hash for all uploaded PDFs
-    hash_object = hashlib.sha256()
+    pdf_bytes = uploaded_file.getvalue()
 
-    for uploaded_file in uploaded_files:
+    # Identify the uploaded PDF using its contents
+    current_hash = hashlib.sha256(pdf_bytes).hexdigest()
 
-        hash_object.update(
-            uploaded_file.name.encode("utf-8")
-        )
+    st.info(f"Selected PDF: {uploaded_file.name}")
 
-        hash_object.update(
-            uploaded_file.getvalue()
-        )
+    # --------------------------------------------------
+    # PROCESS PDF
+    # --------------------------------------------------
 
-    current_hash = hash_object.hexdigest()
-
-    st.success(
-        f"{len(uploaded_files)} PDF(s) selected successfully."
-    )
-
-    # Display uploaded documents
-    with st.expander("View uploaded documents"):
-
-        for uploaded_file in uploaded_files:
-
-            st.write(f"📄 {uploaded_file.name}")
-
-
-    # ==========================================
-    # 5. PROCESS PDF DOCUMENTS
-    # ==========================================
-
-    if st.button("Process PDFs", type="primary"):
+    if st.button("Process PDF", type="primary"):
 
         try:
 
-            with st.spinner(
-                "Processing PDFs. OCR may take some time..."
-            ):
+            total_start = time.time()
 
-                extraction_start = time.time()
+            progress = st.progress(0)
+            status = st.empty()
 
-                os.makedirs("data", exist_ok=True)
+            # STEP 1: Extract text and create chunks
 
-                all_chunks = []
+            status.info("Step 1/3: Extracting PDF text...")
 
-                total_pages = 0
+            extraction_start = time.time()
 
-                processed_files = 0
-
-                # Process each uploaded PDF
-                for file_number, uploaded_file in enumerate(
-                    uploaded_files,
-                    start=1
-                ):
-
-                    st.write(
-                        f"Processing: {uploaded_file.name}"
-                    )
-
-                    pdf_path = (
-                        f"data/upload_{file_number}.pdf"
-                    )
-
-                    # Save uploaded PDF temporarily
-                    with open(pdf_path, "wb") as file:
-
-                        file.write(
-                            uploaded_file.getvalue()
-                        )
-
-                    # Extract text from PDF
-                    pages = extract_text_from_pdf(
-                        pdf_path
-                    )
-
-                    if not pages:
-
-                        st.warning(
-                            f"No readable text found in "
-                            f"{uploaded_file.name}. Skipping it."
-                        )
-
-                        continue
-
-                    # Create chunks
-                    pdf_chunks = create_chunks(pages)
-
-                    # Add PDF filename to every chunk
-                    for chunk in pdf_chunks:
-
-                        chunk["source"] = uploaded_file.name
-
-                    all_chunks.extend(pdf_chunks)
-
-                    total_pages += len(pages)
-
-                    processed_files += 1
-
-
-                # Measure extraction and chunking time
-                extraction_time = (
-                    time.time() - extraction_start
-                )
-
-                st.write(
-                    f"⏱️ PDF extraction and chunking took "
-                    f"{extraction_time:.2f} seconds."
-                )
-
-
-                # Check whether any PDF was processed
-                if not all_chunks:
-
-                    raise ValueError(
-                        "No readable text could be extracted "
-                        "from the uploaded PDFs."
-                    )
-
-
-                # ==========================================
-                # 6. GENERATE EMBEDDINGS
-                # ==========================================
-
-                st.write("Generating embeddings...")
-
-                embedding_start = time.time()
-
-                model = get_embedding_model()
-
-                embeddings = create_embeddings(
-                    all_chunks,
-                    model
-                )
-
-                embedding_time = (
-                    time.time() - embedding_start
-                )
-
-                st.write(
-                    f"⏱️ Embedding generation took "
-                    f"{embedding_time:.2f} seconds."
-                )
-
-
-                # ==========================================
-                # 7. CREATE FAISS INDEX
-                # ==========================================
-
-                index_start = time.time()
-
-                st.write("Creating FAISS vector database...")
-
-                index = create_faiss_index(
-                    embeddings
-                )
-
-                index_time = (
-                    time.time() - index_start
-                )
-
-                st.write(
-                    f"⏱️ FAISS index creation took "
-                    f"{index_time:.2f} seconds."
-                )
-
-
-                # ==========================================
-                # 8. SAVE DATA IN SESSION STATE
-                # ==========================================
-
-                st.session_state.embedding_model = model
-
-                st.session_state.index = index
-
-                st.session_state.chunks = all_chunks
-
-                st.session_state.processed_hash = current_hash
-
-                # Clear previous chat
-                st.session_state.messages = []
-
-
-            st.success(
-                f"Successfully processed {processed_files} PDF(s)! "
-                f"{total_pages} pages with extracted text and "
-                f"{len(all_chunks)} chunks created."
+            chunks, total_pages = process_pdf_cached(
+                pdf_bytes,
+                uploaded_file.name
             )
 
-            st.info(
-                f"Total processing time: "
-                f"{extraction_time + embedding_time + index_time:.2f} seconds."
+            extraction_time = time.time() - extraction_start
+
+            progress.progress(33)
+
+            st.write(
+                f"**Extraction completed:** "
+                f"{total_pages} pages, {len(chunks)} chunks "
+                f"in {extraction_time:.2f} seconds."
+            )
+
+            # STEP 2: Generate embeddings
+
+            status.info("Step 2/3: Loading model and generating embeddings...")
+
+            embedding_start = time.time()
+
+            model = get_embedding_model()
+
+            texts = tuple(
+                chunk["text"]
+                for chunk in chunks
+            )
+
+            embeddings = generate_embeddings_cached(
+                texts,
+                model
+            )
+
+            embedding_time = time.time() - embedding_start
+
+            progress.progress(66)
+
+            st.write(
+                f"**Embedding generation completed:** "
+                f"{embeddings.shape[0]} vectors "
+                f"in {embedding_time:.2f} seconds."
+            )
+
+            # STEP 3: Build FAISS index
+
+            status.info("Step 3/3: Building FAISS index...")
+
+            indexing_start = time.time()
+
+            index = create_faiss_index(embeddings)
+
+            indexing_time = time.time() - indexing_start
+
+            progress.progress(100)
+
+            # SAVE RESULTS IN SESSION STATE
+
+            st.session_state.embedding_model = model
+            st.session_state.index = index
+            st.session_state.chunks = chunks
+            st.session_state.processed_hash = current_hash
+            st.session_state.messages = []
+
+            total_time = time.time() - total_start
+
+            status.success("PDF processed successfully!")
+
+            st.success(
+                f"Processing completed in {total_time:.2f} seconds."
+            )
+
+            st.write(
+                f"**FAISS indexing time:** {indexing_time:.2f} seconds."
             )
 
         except Exception as e:
 
-            st.error(
-                f"PDF processing failed: {e}"
-            )
+            st.error(f"PDF processing failed: {str(e)}")
+
+            st.exception(e)
 
 
-# ==========================================
-# 9. CHAT INTERFACE
-# ==========================================
+# --------------------------------------------------
+# CHAT INTERFACE
+# --------------------------------------------------
 
 if (
-    uploaded_files
-    and st.session_state.processed_hash is not None
-    and st.session_state.processed_hash == current_hash
+    uploaded_file is not None
+    and st.session_state.processed_hash
+    == hashlib.sha256(uploaded_file.getvalue()).hexdigest()
     and st.session_state.index is not None
 ):
 
     st.divider()
 
-    st.subheader("💬 Ask Questions Across Your PDFs")
+    st.subheader("Ask Questions")
 
     st.caption(
-        "Ask questions about the information contained "
-        "in your uploaded documents."
+        f"Currently answering questions from: {uploaded_file.name}"
     )
 
-
-    # ==========================================
-    # 10. DISPLAY CHAT HISTORY
-    # ==========================================
+    # Display previous messages
 
     for message in st.session_state.messages:
 
         with st.chat_message(message["role"]):
 
-            st.markdown(
-                message["content"]
-            )
+            st.markdown(message["content"])
 
-            if message.get("sources"):
+            if message["role"] == "assistant":
 
-                with st.expander("📄 View PDF sources"):
+                sources = message.get("sources", [])
 
-                    for source in message["sources"]:
+                if sources:
 
-                        st.write(
-                            f"**PDF:** "
-                            f"{source.get('source', 'Unknown PDF')}"
-                        )
+                    with st.expander("View source references"):
 
-                        st.write(
-                            f"**Page:** {source['page']}"
-                        )
+                        for source in sources:
 
-                        st.write(
-                            f"**Similarity:** "
-                            f"{source['score']:.4f}"
-                        )
+                            st.write(
+                                f"**{source['source']}** "
+                                f"— Page {source['page']}"
+                            )
 
-                        st.divider()
+                retrieved = message.get("retrieved", [])
 
+                if retrieved:
 
-    # ==========================================
-    # 11. QUESTION INPUT
-    # ==========================================
+                    with st.expander("Debug: Retrieved text"):
+
+                        for item in retrieved:
+
+                            st.write(
+                                f"**Page {item['page']}** "
+                                f"| Similarity: {item['score']:.4f}"
+                            )
+
+                            st.write(item["text"])
+
+                            st.divider()
+
+    # Accept new question
 
     question = st.chat_input(
-        "Ask a question about your PDFs..."
+        "Ask something about your PDF..."
     )
-
 
     if question:
 
-        # Display user question
         st.session_state.messages.append({
             "role": "user",
             "content": question
         })
 
         with st.chat_message("user"):
-
             st.markdown(question)
-
-
-        # ==========================================
-        # 12. RETRIEVE RELEVANT CHUNKS
-        # ==========================================
 
         with st.chat_message("assistant"):
 
-            try:
+            with st.spinner("Searching PDF and generating answer..."):
 
-                with st.spinner(
-                    "Searching PDFs and generating your answer..."
-                ):
+                try:
+
+                    # Retrieve relevant chunks
 
                     retrieved_chunks = search_similar_chunks(
                         question,
@@ -376,136 +334,69 @@ if (
                         top_k=8
                     )
 
+                    # Generate answer using Groq
 
-                    # ==========================================
-                    # 13. DEBUG RETRIEVED CONTENT
-                    # ==========================================
+                    answer = generate_answer(
+                        question,
+                        retrieved_chunks
+                    )
 
-                    with st.expander(
-                        "🔍 Debug: Retrieved text",
-                        expanded=False
-                    ):
-
-                        if retrieved_chunks:
-
-                            for i, chunk in enumerate(
-                                retrieved_chunks,
-                                start=1
-                            ):
-
-                                st.markdown(
-                                    f"### Result {i}"
-                                )
-
-                                st.write(
-                                    "PDF:",
-                                    chunk.get(
-                                        "source",
-                                        "Unknown PDF"
-                                    )
-                                )
-
-                                st.write(
-                                    "Page:",
-                                    chunk["page"]
-                                )
-
-                                st.write(
-                                    "Similarity:",
-                                    round(
-                                        chunk["score"],
-                                        4
-                                    )
-                                )
-
-                                st.write(
-                                    "Retrieved text:"
-                                )
-
-                                st.write(
-                                    chunk["text"]
-                                )
-
-                                st.divider()
-
-                        else:
-
-                            st.write(
-                                "No relevant content was retrieved."
-                            )
-
-
-                    # ==========================================
-                    # 14. GENERATE ANSWER USING GROQ
-                    # ==========================================
-
-                    if not retrieved_chunks:
-
-                        answer = (
-                            "I could not find relevant information "
-                            "in the uploaded PDFs."
-                        )
-
-                    else:
-
-                        answer = generate_answer(
-                            question,
-                            retrieved_chunks
-                        )
-
-
-                    # Display generated answer
                     st.markdown(answer)
 
+                    # Prepare source references
 
-                    # ==========================================
-                    # 15. DISPLAY SOURCE REFERENCES
-                    # ==========================================
+                    sources = []
 
-                    sources = retrieved_chunks
+                    for item in retrieved_chunks:
+
+                        source_info = {
+                            "source": item.get("source", uploaded_file.name),
+                            "page": item["page"]
+                        }
+
+                        if source_info not in sources:
+                            sources.append(source_info)
+
+                    # Save conversation
+
+                    st.session_state.messages.append({
+                        "role": "assistant",
+                        "content": answer,
+                        "sources": sources,
+                        "retrieved": retrieved_chunks
+                    })
 
                     if sources:
 
-                        with st.expander(
-                            "📄 View PDF sources"
-                        ):
+                        with st.expander("View source references"):
 
                             for source in sources:
 
                                 st.write(
-                                    f"**PDF:** "
-                                    f"{source.get('source', 'Unknown PDF')}"
+                                    f"**{source['source']}** "
+                                    f"— Page {source['page']}"
                                 )
 
-                                st.write(
-                                    f"**Page:** {source['page']}"
-                                )
+                    with st.expander("Debug: Retrieved text"):
 
-                                st.write(
-                                    f"**Similarity:** "
-                                    f"{source['score']:.4f}"
-                                )
+                        for item in retrieved_chunks:
 
-                                st.divider()
+                            st.write(
+                                f"**Page {item['page']}** "
+                                f"| Similarity: {item['score']:.4f}"
+                            )
 
+                            st.write(item["text"])
 
-                # ==========================================
-                # 16. SAVE ASSISTANT RESPONSE
-                # ==========================================
+                            st.divider()
 
-                st.session_state.messages.append({
+                except Exception as e:
 
-                    "role": "assistant",
-
-                    "content": answer,
-
-                    "sources": sources
-
-                })
+                    st.error(f"Error generating answer: {str(e)}")
 
 
-            except Exception as e:
+elif uploaded_file is not None:
 
-                st.error(
-                    f"Error generating answer: {e}"
-                )
+    st.warning(
+        "Please click 'Process PDF' before asking questions."
+    )

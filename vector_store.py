@@ -27,11 +27,7 @@ def load_embedding_model():
 # 2. GENERATE EMBEDDINGS
 # ==========================================
 
-
 def create_embeddings(chunks, model):
-    """
-    Generate normalized embeddings in small batches.
-    """
 
     import torch
 
@@ -53,8 +49,6 @@ def create_embeddings(chunks, model):
     print("Embeddings generated successfully!")
 
     return embeddings
-
-
 
 
 
