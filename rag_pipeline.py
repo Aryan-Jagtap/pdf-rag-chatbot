@@ -1,304 +1,151 @@
 
 import os
-import json
-import faiss
-
-from dotenv import load_dotenv
+import streamlit as st
 from groq import Groq
-
-from vector_store import (
-    load_embedding_model,
-    search_similar_chunks
-)
-
-
-# ==========================================
-# 1. LOAD ENVIRONMENT VARIABLES
-# ==========================================
+from dotenv import load_dotenv
 
 load_dotenv()
 
-API_KEY = os.getenv("GROQ_API_KEY")
+# Groq model configuration
+MODEL_NAME = "openai/gpt-oss-20b"
 
-# If the key is not in .env, check Streamlit Cloud Secrets
-if not API_KEY:
 
+def get_groq_client():
+    """
+    Creates and returns the Groq API client.
+    Reads the API key from Streamlit secrets or the local .env file.
+    """
+
+    api_key = os.getenv("GROQ_API_KEY")
+
+    # Use Streamlit Cloud secrets if available
     try:
-        import streamlit as st
-        API_KEY = st.secrets["GROQ_API_KEY"]
-
+        if not api_key:
+            api_key = st.secrets["GROQ_API_KEY"]
     except Exception:
-        API_KEY = None
+        pass
 
-if not API_KEY:
-    raise ValueError(
-        "GROQ_API_KEY not found. Check your .env file "
-        "or Streamlit Cloud Secrets."
+    if not api_key:
+        raise ValueError(
+            "Groq API key not found. Add GROQ_API_KEY to your .env "
+            "file or Streamlit Cloud secrets."
+        )
+
+    return Groq(
+        api_key=api_key,
+        timeout=45,
+        max_retries=2
     )
 
-
-# ==========================================
-# 2. INITIALIZE GROQ
-# ==========================================
-
-client = Groq(
-    api_key=API_KEY,
-    timeout=45.0,
-    max_retries=2
-)
-
-GROQ_MODEL = "openai/gpt-oss-20b"
-
-
-# ==========================================
-# 3. LOAD SAVED VECTOR DATABASE
-# ==========================================
-
-def load_vector_store():
-
-    print("Loading FAISS vector database...")
-
-    index = faiss.read_index("data/faiss_index.bin")
-
-    with open("data/chunks.json", "r", encoding="utf-8") as file:
-        chunks = json.load(file)
-
-    print("Vector database loaded successfully!")
-
-    return index, chunks
-
-
-# ==========================================
-# 4. GENERATE ANSWER USING GROQ
-# ==========================================
 
 def generate_answer(question, retrieved_chunks):
+    """
+    Generates an answer using retrieved PDF content.
+    If the PDF does not contain the answer, general knowledge is used
+    and clearly identified.
+    """
 
-    # Prepare all retrieved PDF content
-    context_parts = []
+    client = get_groq_client()
+
+    # Prepare context from retrieved PDF chunks
+    context = ""
 
     for i, chunk in enumerate(retrieved_chunks, start=1):
+        page = chunk.get("page", "Unknown")
+        source = chunk.get("source", "Uploaded PDF")
+        text = chunk.get("text", "")
 
-        context_parts.append(
-            f"""
-            DOCUMENT CHUNK {i}
-
-            PDF Name: {chunk.get('source', 'Unknown PDF')}
-            Page Number: {chunk['page']}
-
-            CONTENT:
-            {chunk['text']}
-
-            --------------------------------
-            """
+        context += (
+            f"\n[Source {i} | PDF: {source} | Page: {page}]\n"
+            f"{text}\n"
         )
 
-    context = "\n".join(context_parts)
-
-    # Instructions for Groq
+    # Instructions for the AI model
     system_prompt = """
-    You are an accurate PDF question-answering assistant.
+You are a helpful and accurate PDF-based AI assistant.
 
-    Your task is to answer questions using the information
-    provided in the retrieved PDF content.
+Your job is to answer the user's questions using the uploaded PDF
+whenever the required information is available.
 
-    FOLLOW THESE RULES STRICTLY:
+Follow these rules carefully:
 
-    1. Read ALL the document chunks before preparing your answer.
+1. FIRST check whether the retrieved PDF content contains information
+   that answers the user's question.
 
-    2. Do not focus only on the first or most relevant chunk.
-       Information in later chunks is equally important.
+2. IF THE ANSWER IS AVAILABLE IN THE PDF:
+   - Answer using the PDF content.
+   - Preserve important terminology and concepts from the PDF.
+   - Explain the answer clearly in simple language.
+   - Give relevant examples where useful.
+   - Mention the correct PDF page number.
+   - Do not unnecessarily introduce unrelated information.
 
-    3. When the user asks for a list, identify EVERY relevant
-       item mentioned across ALL the provided chunks.
+3. IF THE ANSWER IS NOT AVAILABLE IN THE PDF:
+   - Do not refuse to answer.
+   - Use your general knowledge to answer the question.
+   - Start your response with:
+     "Note: This answer is based on general knowledge because the
+     uploaded PDF does not contain the explanation."
+   - Provide a complete, accurate and useful answer.
+   - Do not pretend that general knowledge came from the PDF.
+   - Do not invent PDF page references.
 
-    4. If the user asks for projects mentioned in a resume,
-       identify every distinct project name you can find.
-       Do not stop after finding the first project.
+4. IF THE PDF CONTAINS ONLY THE QUESTION BUT NOT ITS ANSWER:
+   - Recognize that the question itself is not an explanation.
+   - Answer using general knowledge.
+   - Clearly identify the answer as general knowledge.
 
-    5. For each project, include:
-       - Project name
-       - Description or purpose
-       - Technologies used, if mentioned
-       - The user's contribution, if explicitly mentioned
+5. IF THE PDF CONTAINS PARTIAL INFORMATION:
+   - Use the available PDF information first.
+   - Fill missing details using general knowledge if necessary.
+   - Clearly distinguish the additional information from PDF content.
 
-    6. Combine information about the same project if it appears
-       in multiple chunks. Do not list the same project twice.
+6. NEVER invent information, quotations, page numbers or sources.
 
-    7. Never ignore a project just because its description
-       appears in a different document chunk.
+7. If the question is unclear, ask the user to clarify it.
 
-    8. Do not invent project names, technologies, responsibilities,
-       achievements, or other information.
+8. Structure answers with headings, paragraphs and bullet points
+   wherever appropriate.
 
-    9. If a detail is not available in the PDF, write
-       "Not specified in the provided PDF."
+9. For academic questions, provide answers that are easy to understand,
+   sufficiently detailed and suitable for examination preparation.
 
-    10. If the PDF contains insufficient information to answer,
-        clearly explain what information is missing.
-
-    11. Mention the PDF filename and page number when possible.
-
-    12. Use simple, clear language and organize answers with
-        headings and bullet points.
-
-    COMPLETENESS IS IMPORTANT:
-    Before finalizing a list, review every provided document chunk
-    again and check that no relevant item has been omitted.
-    """
+10. Always answer the actual question instead of simply describing
+    what information is or is not present in the PDF.
+"""
 
     user_prompt = f"""
-    RETRIEVED PDF CONTENT:
+UPLOADED PDF CONTENT:
 
-    {context}
+{context}
 
-    USER QUESTION:
+USER QUESTION:
 
-    {question}
+{question}
 
-    INSTRUCTIONS:
-
-    Answer the question using all the retrieved content.
-
-    If the question asks for all projects, list every distinct
-    project that appears anywhere in the provided content.
-
-    Do not provide only examples or a partial list.
-
-    Check all document chunks before finalizing your answer.
-    """
-
-    print("\nSending question to Groq...")
-
-    response = client.chat.completions.create(
-
-        model=GROQ_MODEL,
-
-        messages=[
-            {
-                "role": "system",
-                "content": system_prompt
-            },
-            {
-                "role": "user",
-                "content": user_prompt
-            }
-        ],
-
-        max_completion_tokens=2048
-    )
-
-    answer = response.choices[0].message.content
-
-    if not answer:
-
-        raise RuntimeError(
-            "Groq returned an empty response."
-        )
-
-    print("\nAnswer generated successfully using Groq!")
-
-    return answer
-
-
-
-   
-
-# ==========================================
-# 5. COMPLETE RAG PIPELINE
-# ==========================================
-
-def ask_question(question, model, index, chunks):
-
-    print("\nSearching for relevant PDF content...")
-
-    # Retrieve relevant chunks using FAISS
-    retrieved_chunks = search_similar_chunks(
-        question,
-        model,
-        index,
-        chunks,
-        top_k=4
-    )
-
-    if not retrieved_chunks:
-
-        return "No relevant PDF content was found."
-
-    # Display retrieved sources
-    print("\nRetrieved PDF sources:")
-
-    for result in retrieved_chunks:
-
-        print(
-            f"Page {result['page']} "
-            f"| Similarity: {result['score']:.4f}"
-        )
-
-    print("\nGenerating answer using Groq...")
-
-    # Generate final answer
-    answer = generate_answer(
-        question,
-        retrieved_chunks
-    )
-
-    return answer
-
-
-# ==========================================
-# 6. RUN THE RAG CHATBOT
-# ==========================================
-
-if __name__ == "__main__":
+Answer the question by following the instructions carefully.
+"""
 
     try:
+        response = client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[
+                {
+                    "role": "system",
+                    "content": system_prompt
+                },
+                {
+                    "role": "user",
+                    "content": user_prompt
+                }
+            ],
+            temperature=0.2,
+            max_tokens=1500
+        )
 
-        # Load embedding model
-        embedding_model = load_embedding_model()
+        answer = response.choices[0].message.content
 
-        # Load FAISS index and chunks
-        index, chunks = load_vector_store()
-
-        print("\nPDF RAG Chatbot is ready!")
-
-        print("Type 'exit' to stop the chatbot.")
-
-        while True:
-
-            question = input("\nAsk a question: ").strip()
-
-            if question.lower() in ["exit", "quit"]:
-
-                print("Chatbot closed.")
-
-                break
-
-            if not question:
-
-                print("Please enter a question.")
-
-                continue
-
-            try:
-
-                answer = ask_question(
-                    question,
-                    embedding_model,
-                    index,
-                    chunks
-                )
-
-                print("\n========== ANSWER ==========")
-
-                print(answer)
-
-                print("\n============================")
-
-            except Exception as e:
-
-                print("\nError generating answer:", e)
+        return answer.strip() if answer else "Sorry, I could not generate an answer."
 
     except Exception as e:
-
-        print("\nApplication startup error:", e)
+        return f"An error occurred while generating the answer: {str(e)}"
