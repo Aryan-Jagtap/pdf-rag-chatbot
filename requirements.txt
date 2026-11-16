@@ -1,0 +1,11 @@
+
+streamlit==1.67.0
+pypdf
+pymupdf
+pytesseract
+pillow
+sentence-transformers
+faiss-cpu
+groq
+python-dotenv
+numpy
