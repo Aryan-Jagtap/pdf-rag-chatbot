@@ -1,5 +1,6 @@
 
 import os
+import time
 import hashlib
 import streamlit as st
 
@@ -116,6 +117,8 @@ if uploaded_files:
                 "Processing PDFs. OCR may take some time..."
             ):
 
+                extraction_start = time.time()
+
                 os.makedirs("data", exist_ok=True)
 
                 all_chunks = []
@@ -174,6 +177,17 @@ if uploaded_files:
                     processed_files += 1
 
 
+                # Measure extraction and chunking time
+                extraction_time = (
+                    time.time() - extraction_start
+                )
+
+                st.write(
+                    f"⏱️ PDF extraction and chunking took "
+                    f"{extraction_time:.2f} seconds."
+                )
+
+
                 # Check whether any PDF was processed
                 if not all_chunks:
 
@@ -189,6 +203,8 @@ if uploaded_files:
 
                 st.write("Generating embeddings...")
 
+                embedding_start = time.time()
+
                 model = get_embedding_model()
 
                 embeddings = create_embeddings(
@@ -196,15 +212,35 @@ if uploaded_files:
                     model
                 )
 
+                embedding_time = (
+                    time.time() - embedding_start
+                )
+
+                st.write(
+                    f"⏱️ Embedding generation took "
+                    f"{embedding_time:.2f} seconds."
+                )
+
 
                 # ==========================================
                 # 7. CREATE FAISS INDEX
                 # ==========================================
 
+                index_start = time.time()
+
                 st.write("Creating FAISS vector database...")
 
                 index = create_faiss_index(
                     embeddings
+                )
+
+                index_time = (
+                    time.time() - index_start
+                )
+
+                st.write(
+                    f"⏱️ FAISS index creation took "
+                    f"{index_time:.2f} seconds."
                 )
 
 
@@ -228,6 +264,11 @@ if uploaded_files:
                 f"Successfully processed {processed_files} PDF(s)! "
                 f"{total_pages} pages with extracted text and "
                 f"{len(all_chunks)} chunks created."
+            )
+
+            st.info(
+                f"Total processing time: "
+                f"{extraction_time + embedding_time + index_time:.2f} seconds."
             )
 
         except Exception as e:
@@ -468,5 +509,3 @@ if (
                 st.error(
                     f"Error generating answer: {e}"
                 )
-
-

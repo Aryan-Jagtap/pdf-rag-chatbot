@@ -27,6 +27,7 @@ def load_embedding_model():
 # 2. GENERATE EMBEDDINGS
 # ==========================================
 
+d
 def create_embeddings(chunks, model):
 
     texts = [chunk["text"] for chunk in chunks]
@@ -35,12 +36,15 @@ def create_embeddings(chunks, model):
 
     embeddings = model.encode(
         texts,
+        batch_size=32,
         convert_to_numpy=True,
         normalize_embeddings=True,
-        show_progress_bar=True
+        show_progress_bar=True,
+        device="cpu"
     )
 
     return embeddings
+
 
 
 # ==========================================
