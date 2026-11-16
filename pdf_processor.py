@@ -32,10 +32,10 @@ def extract_text_from_pdf(pdf_path):
 
                 # Convert PDF page into a high-resolution image
                 pix = pdf_page.get_pixmap(
-                    dpi=350,
-                    colorspace=fitz.csRGB,
-                    alpha=False
-                )
+    dpi=200,
+    colorspace=fitz.csRGB,
+    alpha=False
+)
 
                 image = Image.frombytes(
                     "RGB",
