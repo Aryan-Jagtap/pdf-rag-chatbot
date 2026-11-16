@@ -27,7 +27,7 @@ def load_embedding_model():
 # 2. GENERATE EMBEDDINGS
 # ==========================================
 
-d
+
 def create_embeddings(chunks, model):
 
     texts = [chunk["text"] for chunk in chunks]
